@@ -1,0 +1,95 @@
+# Qwen3-8B architecture config
+# Reference: https://arxiv.org/abs/2505.09388
+#
+# Note: head_dim (128) == hidden_size / num_attention_heads (4096/32 = 128).
+# Embedding weights are NOT tied (no_weight_tying: true).
+{
+  "pipe_parallel_size": 1,
+  "model_parallel_size": 1,
+  "make_vocab_size_divisible_by": 128,
+
+  # model settings
+  "num_layers": 36,
+  "hidden_size": 4096,
+  # NeoX intermediate_size = 3 * HF intermediate_size (12288) for SwiGLU
+  "intermediate_size": 36864,
+  "num_attention_heads": 32,
+  "num_kv_heads": 8,
+  "head_dim": 128,
+  "seq_length": 4096,
+  "max_position_embeddings": 40960,
+  "pos_emb": "rotary",
+  "rotary_pct": 1,
+  "rotary_emb_base": 1000000,
+  "no_weight_tying": true,
+  "gpt_j_residual": false,
+  "output_layer_parallelism": "column",
+  "norm": "rmsnorm",
+  "rms_norm_epsilon": 1.0e-6,
+
+  "attention_config": [[["flash"], 36]],
+  "use_qk_norm": true,
+
+  "scaled_upper_triang_masked_softmax_fusion": true,
+  "bias_gelu_fusion": false,
+  "use_bias_in_norms": false,
+  "use_bias_in_attn_linear": false,
+  "use_bias_in_mlp": false,
+  "activation": "swiglu",
+
+  # init
+  "init_method": "normal",
+  "init_method_std": 0.02,
+
+  # optimizer settings
+  "optimizer": {
+    "type": "Adam",
+    "params": {
+      "lr": 0.0001,
+      "betas": [0.9, 0.95],
+      "eps": 1.0e-8,
+    }
+  },
+  "min_lr": 0.00001,
+
+  "zero_optimization": {
+    "stage": 1,
+    "allgather_partitions": true,
+    "allgather_bucket_size": 500000000,
+    "overlap_comm": true,
+    "reduce_scatter": true,
+    "reduce_bucket_size": 500000000,
+    "contiguous_gradients": true,
+  },
+
+  # batch / data settings
+  "train_micro_batch_size_per_gpu": 2,
+  "data_impl": "mmap",
+
+  # activation checkpointing
+  "checkpoint_activations": true,
+  "checkpoint_num_layers": 1,
+  "partition_activations": true,
+  "synchronize_each_layer": true,
+
+  # precision settings
+  "bf16": {
+    "enabled": true,
+  },
+
+  # regularization
+  "gradient_clipping": 1.0,
+  "weight_decay": 0.1,
+  "hidden_dropout": 0,
+  "attention_dropout": 0,
+
+  # misc. training settings
+  "lr_decay_style": "cosine",
+  "warmup": 0.01,
+  "distributed_backend": "nccl",
+
+  # logging
+  "log_interval": 10,
+  "steps_per_print": 10,
+  "wall_clock_breakdown": true,
+}

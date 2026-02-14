@@ -147,6 +147,15 @@ class NeoXArgsModel(NeoXArgsTemplate):
     Must be < num_attention_heads and divide num_attention_heads evenly.
     """
 
+    head_dim: int = None
+    """
+    Dimension of each attention head. If not set, defaults to hidden_size / num_attention_heads.
+
+    When set explicitly, allows head_dim to differ from hidden_size / num_attention_heads
+    (e.g., Qwen3 uses head_dim=128 for all models regardless of hidden_size/num_heads ratio).
+    The Q/K/V/O projections will use num_attention_heads * head_dim as the attention hidden dimension.
+    """
+
     seq_length: int = None
     """
     Maximum sequence length to process.
@@ -187,6 +196,13 @@ class NeoXArgsModel(NeoXArgsTemplate):
     use_qk_layernorm: bool = False
     """
     Use QK Normalization
+    """
+
+    use_qk_norm: bool = False
+    """
+    Use per-head QK normalization (as in Qwen3). Applies separate RMSNorm to Q and K
+    per-head after projection and before RoPE. Each norm has learnable scale of shape (head_dim,).
+    Uses the norm type specified by the 'norm' config (typically rmsnorm).
     """
 
     layernorm_epsilon: float = 1.0e-5

@@ -300,12 +300,18 @@ class ParallelSelfAttention(nn.Module):
         # Per attention head and per partition values.
         world_size = mpu.get_model_parallel_world_size()
         self.hidden_size_per_partition = mpu.divide(neox_args.hidden_size, world_size)
-        self.hidden_size_per_attention_head = mpu.divide(
-            neox_args.hidden_size, neox_args.num_attention_heads
-        )
+        if neox_args.head_dim is not None:
+            self.hidden_size_per_attention_head = neox_args.head_dim
+        else:
+            self.hidden_size_per_attention_head = mpu.divide(
+                neox_args.hidden_size, neox_args.num_attention_heads
+            )
         self.num_attention_heads_per_partition = mpu.divide(
             neox_args.num_attention_heads, world_size
         )
+        # The total attention hidden dimension (may differ from hidden_size when head_dim is set independently)
+        self.attn_hidden_size = neox_args.num_attention_heads * self.hidden_size_per_attention_head
+        self.attn_hidden_size_per_partition = self.num_attention_heads_per_partition * self.hidden_size_per_attention_head
         self.pos_emb = neox_args.pos_emb
 
         self.use_qk_layernorm = neox_args.use_qk_layernorm
@@ -318,6 +324,13 @@ class ParallelSelfAttention(nn.Module):
                 ],
                 eps=eps,
             )
+
+        self.use_qk_norm = neox_args.use_qk_norm
+        if self.use_qk_norm:
+            from .norms import RMSNorm
+            qk_norm_eps = neox_args.rms_norm_epsilon
+            self.q_norm = RMSNorm(self.hidden_size_per_attention_head, eps=qk_norm_eps)
+            self.k_norm = RMSNorm(self.hidden_size_per_attention_head, eps=qk_norm_eps)
 
         self.sliding_window_width = neox_args.sliding_window_width
 
@@ -337,14 +350,14 @@ class ParallelSelfAttention(nn.Module):
             )  # how large the total hidden dim for each of K and V is
         else:
             self.num_kv_heads_per_partition = self.num_attention_heads_per_partition
-            self.kv_hidden_size = neox_args.hidden_size
+            self.kv_hidden_size = neox_args.num_kv_heads * self.hidden_size_per_attention_head if neox_args.num_kv_heads else self.attn_hidden_size
 
         if not self.gqa:
             # Strided linear layer.
             self.query_key_value = ColumnParallelLinear(
                 neox_args=neox_args,
                 input_size=neox_args.hidden_size,
-                output_size=3 * neox_args.hidden_size,
+                output_size=self.attn_hidden_size + 2 * self.kv_hidden_size,
                 gather_output=False,
                 init_method=init_method,
                 bias=neox_args.use_bias_in_attn_linear,
@@ -354,7 +367,7 @@ class ParallelSelfAttention(nn.Module):
             self.query_key_value = ColumnParallelLinear(
                 neox_args=neox_args,
                 input_size=neox_args.hidden_size,
-                output_size=neox_args.hidden_size + 2 * self.kv_hidden_size,
+                output_size=self.attn_hidden_size + 2 * self.kv_hidden_size,
                 gather_output=False,
                 init_method=init_method,
                 bias=neox_args.use_bias_in_attn_linear,
@@ -461,7 +474,7 @@ class ParallelSelfAttention(nn.Module):
         # Output.
         self.dense = RowParallelLinear(
             neox_args=neox_args,
-            input_size=neox_args.hidden_size,
+            input_size=self.attn_hidden_size,
             output_size=neox_args.hidden_size,
             input_is_parallel=True,
             init_method=output_layer_init_method,
@@ -820,6 +833,11 @@ class ParallelSelfAttention(nn.Module):
             query_layer = self.qk_layernorm(query_layer)
             key_layer = self.qk_layernorm(key_layer)
 
+        # Per-head QK Normalization (Qwen3-style)
+        if self.use_qk_norm:
+            query_layer = self.q_norm(query_layer)
+            key_layer = self.k_norm(key_layer)
+
         if exists(self.rotary_emb):
             if exists(self.rotary_ndims):
                 # partial rotary
@@ -889,7 +907,7 @@ class ParallelSelfAttention(nn.Module):
 
         # [sq, b, np, hn] --> [sq, b, hp]
         new_context_layer_shape = context_layer.size()[:-2] + (
-            self.hidden_size_per_partition,
+            self.attn_hidden_size_per_partition,
         )
         context_layer = context_layer.view(*new_context_layer_shape)
 

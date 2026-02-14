@@ -1242,13 +1242,13 @@ class NeoXArgs(*BASE_CLASSES):
                 return False
 
         # Checks.
-        if self.hidden_size % self.num_attention_heads != 0 and not (
+        if self.head_dim is None and self.hidden_size % self.num_attention_heads != 0 and not (
             "mamba" in self.attention_config
         ):
             error_message = (
                 f"{FAIL}"
                 + self.__class__.__name__
-                + ".validate_values() hidden_size must be divisible by num_attention_heads"
+                + ".validate_values() hidden_size must be divisible by num_attention_heads (or set head_dim explicitly)"
             )
             logging.error(error_message)
             raise ValueError(error_message)
