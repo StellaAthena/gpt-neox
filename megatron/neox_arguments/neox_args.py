@@ -1654,3 +1654,18 @@ class NeoXArgsMoE(NeoXArgsTemplate):
     Coefficient for MoE routing jitter. Jitter is
     not used if set to None
     """
+
+    moe_normalize_expert_weights: bool = False
+    """
+    Renormalize top-k expert weights to sum to 1 after selection.
+    Required for Qwen3-style MoE (norm_topk_prob=true).
+    Only applies to the topk router.
+    """
+
+    moe_aux_loss_coeff: float = 0.0
+    """
+    Coefficient for the auxiliary load-balancing loss added to the training loss.
+    Encourages balanced expert utilization and prevents routing collapse.
+    Set to 0.0 to disable. Qwen3 uses 0.001.
+    Only applies to the topk router.
+    """

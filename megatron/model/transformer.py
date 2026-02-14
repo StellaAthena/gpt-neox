@@ -1118,7 +1118,12 @@ class ParallelTransformerLayer(nn.Module):
                         )
 
                 # mlp operator
-                mlp_output, mlp_bias = self.mlp(x2)
+                mlp_output, mlp_bias_or_aux = self.mlp(x2)
+                if self.num_experts > 1:
+                    self._moe_aux_loss = mlp_bias_or_aux
+                    mlp_bias = None
+                else:
+                    mlp_bias = mlp_bias_or_aux
                 if mlp_bias is not None:
                     with torch.enable_grad() if not self.eval else nullcontext():
                         output = bias_dropout_fn(
@@ -1176,13 +1181,18 @@ class ParallelTransformerLayer(nn.Module):
                     0.0, device=layernorm_output.device, dtype=layernorm_output.dtype
                 )
 
-                # call signatures of both dense and MoE are the same
-                mlp_output, mlp_bias = self.mlp(layernorm_output)
+                # MoE returns (output, aux_loss), dense MLP returns (output, bias)
+                mlp_output, mlp_bias_or_aux = self.mlp(layernorm_output)
+
+                if self.num_experts > 1:
+                    # mlp_bias_or_aux is the MoE auxiliary loss (or None)
+                    self._moe_aux_loss = mlp_bias_or_aux
+                    mlp_bias = None
+                else:
+                    mlp_bias = mlp_bias_or_aux
 
                 with torch.enable_grad() if not self.eval else nullcontext():
-                    if mlp_bias == None or (self.num_experts > 1):
-                        # No dropout either
-                        assert mlp_bias is None
+                    if mlp_bias is None:
                         output = mlp_output + attention_output
                     else:
                         output = bias_dropout_fn(

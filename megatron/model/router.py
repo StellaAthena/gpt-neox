@@ -183,7 +183,7 @@ class SinkhornRouter(torch.nn.Module):
         expert_weights_broadcast.wait()
         expert_indices_broadcast.wait()
 
-        return expert_weights, expert_indices
+        return expert_weights, expert_indices, None
 
 
 class TopKTokenChoiceRouter(torch.nn.Module):
@@ -198,6 +198,9 @@ class TopKTokenChoiceRouter(torch.nn.Module):
         super().__init__()
         self.jitter_eps = neox_args.moe_jitter_eps
         self.top_k = neox_args.moe_top_k
+        self.num_experts = neox_args.moe_num_experts
+        self.normalize_expert_weights = neox_args.moe_normalize_expert_weights
+        self.aux_loss_coeff = neox_args.moe_aux_loss_coeff
 
         # Learned router parameters.
         #
@@ -245,6 +248,37 @@ class TopKTokenChoiceRouter(torch.nn.Module):
             return scores.max(dim=-1, keepdim=True)
         return torch.topk(scores, self.top_k, dim=-1)
 
+    def _aux_loss(self, scores, expert_indices):
+        """
+        Compute the auxiliary load-balancing loss (Switch Transformer style).
+
+        The loss encourages uniform expert utilization across the global batch.
+        L_aux = N * sum_i(f_i * P_i), where:
+          f_i = fraction of tokens routed to expert i
+          P_i = mean routing probability for expert i across all tokens
+          N = number of experts
+
+        Args:
+            scores (torch.Tensor): Full softmax routing probabilities, shape (num_tokens, num_experts).
+            expert_indices (torch.Tensor): Selected expert indices, shape (num_tokens, top_k).
+
+        Returns:
+            torch.Tensor: Scalar auxiliary loss.
+        """
+        num_tokens = scores.shape[0]
+        # f_i: fraction of tokens routed to each expert
+        # Count how many times each expert appears in the top-k selections
+        expert_mask = torch.zeros_like(scores)
+        expert_mask.scatter_add_(
+            1,
+            expert_indices,
+            torch.ones_like(expert_indices, dtype=scores.dtype),
+        )
+        f = expert_mask.sum(dim=0) / (num_tokens * self.top_k)  # (num_experts,)
+        # P_i: mean routing probability for each expert
+        P = scores.mean(dim=0)  # (num_experts,)
+        return self.num_experts * (f * P).sum()
+
     def forward(self, x):
         """
         Forward pass through the Learned Router.
@@ -254,9 +288,10 @@ class TopKTokenChoiceRouter(torch.nn.Module):
                 (sl, bs, hs)
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]: Tuple containing
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Tuple containing
                 - expert_weights (sl * bs, top_k): Weights assigned to the selected experts
                 - expert_indices (sl * bs, top_k): Indices of the selected experts
+                - aux_loss (scalar or None): Auxiliary load-balancing loss if enabled
         """
         if self.training and self.jitter_eps is not None:
             x = x * self.jitter(x)
@@ -268,8 +303,14 @@ class TopKTokenChoiceRouter(torch.nn.Module):
         # expert_weights (float) shape: (sl * bs, top_k)...value(s) from scores corresponding to the top_k experts
         # expert_indices (int) shape: (sl * bs, top_k)...index(indices) from scores corresponding to the top_k experts
         expert_weights, expert_indices = self._top_k(scores)
-        # expert_weights probability mass won't add up to 1 because we took
-        # the topk scores from the softmax
-        # TODO: placeholder for moe_normalize_expert_weights if necessary
 
-        return expert_weights, expert_indices
+        # Renormalize top-k weights to sum to 1 (Qwen3 norm_topk_prob)
+        if self.normalize_expert_weights:
+            expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True)
+
+        # Compute auxiliary load-balancing loss
+        aux_loss = None
+        if self.training and self.aux_loss_coeff > 0:
+            aux_loss = self.aux_loss_coeff * self._aux_loss(scores, expert_indices)
+
+        return expert_weights, expert_indices, aux_loss

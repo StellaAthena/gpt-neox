@@ -530,6 +530,27 @@ def get_batch_sequential(forward_input, neox_args):
     return (forward_input[0], forward_input[1], attention_mask)
 
 
+def _add_moe_aux_losses(model, loss, metrics):
+    """Accumulate MoE auxiliary losses from all transformer layers and add to main loss."""
+    from megatron.model.transformer import ParallelTransformerLayer
+
+    aux_loss_sum = torch.tensor(0.0, device=loss.device, dtype=loss.dtype)
+    n_aux = 0
+    for module in model.modules():
+        if isinstance(module, ParallelTransformerLayer) and hasattr(
+            module, "_moe_aux_loss"
+        ):
+            aux = module._moe_aux_loss
+            if aux is not None:
+                aux_loss_sum = aux_loss_sum + aux
+                n_aux += 1
+            del module._moe_aux_loss
+    if n_aux > 0:
+        metrics["moe_aux_loss"] = aux_loss_sum.detach().item()
+        loss = loss + aux_loss_sum
+    return loss
+
+
 def forward_step(
     data_iterator,
     model,
@@ -597,6 +618,8 @@ def forward_step(
         loss = cross_entropy(
             outputs, (labels, loss_mask), _fp16=neox_args.fp16_lm_cross_entropy
         )
+        # Accumulate MoE auxiliary losses from all transformer layers
+        loss = _add_moe_aux_losses(model, loss, metrics)
     elif neox_args.train_impl == "rm":
         maybe_tuple = model((tokens, position_ids, attention_mask), neox_args=neox_args)
         if type(maybe_tuple) is tuple:

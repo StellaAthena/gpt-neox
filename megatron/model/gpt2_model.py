@@ -59,14 +59,6 @@ def gpt2_attention_mask_func(attention_scores, ltor_mask):
 
 def cross_entropy(output, labels, _fp16=False):
     """From pretrain_gpt2:forward_step()"""
-    """
-    if self.fp16_lm_cross_entropy:
-        assert output.dtype == torch.half
-        loss = mpu.vocab_parallel_cross_entropy(output, labels)
-    else:
-        loss = mpu.vocab_parallel_cross_entropy(output.float(), labels)
-        return loss
-    """
     labels, loss_mask = labels[0], labels[1]
     if _fp16:
         assert output.dtype == torch.half and loss_mask.dtype == torch.half
@@ -76,6 +68,34 @@ def cross_entropy(output, labels, _fp16=False):
     loss_mask = loss_mask.view(-1)
     loss = torch.sum(losses.view(-1) * loss_mask) / loss_mask.sum()
     return loss
+
+
+class CrossEntropyWithMoEAuxLoss:
+    """Wrapper around cross_entropy that also accumulates MoE auxiliary losses.
+
+    Used as the loss_fn for pipeline parallel, where DeepSpeed calls
+    loss_fn(output, labels) on the last stage. This collects _moe_aux_loss
+    from any MoE transformer layers on this pipeline stage.
+    """
+
+    def __init__(self, model, _fp16=False):
+        self.model = model
+        self._fp16 = _fp16
+
+    def __call__(self, output, labels):
+        loss = cross_entropy(output, labels, _fp16=self._fp16)
+
+        from megatron.model.transformer import ParallelTransformerLayer
+
+        for module in self.model.modules():
+            if isinstance(module, ParallelTransformerLayer) and hasattr(
+                module, "_moe_aux_loss"
+            ):
+                aux = module._moe_aux_loss
+                if aux is not None:
+                    loss = loss + aux
+                del module._moe_aux_loss
+        return loss
 
 
 def _pre_transformer_block(args):
@@ -128,9 +148,18 @@ class GPT2ModelPipe(PipelineModule, torch.nn.Module):
         self.specs = []
         self.init_specs()  # initializes the layer specs (basically a fancy nn.Sequential)
 
+        if neox_args.moe_num_experts > 1 and neox_args.moe_aux_loss_coeff > 0:
+            loss_fn = CrossEntropyWithMoEAuxLoss(
+                self, _fp16=self.neox_args.fp16_lm_cross_entropy
+            )
+        else:
+            loss_fn = partial(
+                cross_entropy, _fp16=self.neox_args.fp16_lm_cross_entropy
+            )
+
         super().__init__(
             layers=self.specs,
-            loss_fn=partial(cross_entropy, _fp16=self.neox_args.fp16_lm_cross_entropy),
+            loss_fn=loss_fn,
             topology=topology,
             activation_checkpoint_interval=self.neox_args.checkpoint_num_layers
             if self.neox_args.checkpoint_activations

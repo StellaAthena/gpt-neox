@@ -244,7 +244,7 @@ class ParallelDroplessMoE(torch.nn.Module):
         x = cast_if_autocast_enabled(x)
 
         # Compute the expert scores and assignments
-        expert_weights, expert_indices = self.router(x)
+        expert_weights, expert_indices, aux_loss = self.router(x)
 
         # return value should be
-        return self.experts(x, expert_weights, expert_indices), None
+        return self.experts(x, expert_weights, expert_indices), aux_loss
